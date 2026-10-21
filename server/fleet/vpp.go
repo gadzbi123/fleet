@@ -3,12 +3,15 @@ package fleet
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"time"
 
 	"github.com/fleetdm/fleet/v4/server/variables"
 	"howett.net/plist"
 )
+
+var xmlCommentRegexp = regexp.MustCompile(`(?s)<!--.*?-->`)
 
 type VPPAppID struct {
 	// AdamID is a unique identifier assigned to each app in
@@ -149,6 +152,8 @@ type VPPAppStoreApp struct {
 	// Configuration is the managed app configuration payload.
 	// JSON for Android, XML for iOS / iPadOS.
 	Configuration json.RawMessage `json:"configuration,omitempty"`
+	// ConfigurationUpdatedAt is when the configuration last changed.
+	ConfigurationUpdatedAt *time.Time `db:"configuration_updated_at" json:"-"`
 }
 
 const (
@@ -234,6 +239,10 @@ type HostVPPSoftwareInstall struct {
 	RetryCount           int        `db:"retry_count"`
 	ExpectedVersion      string     `db:"expected_version"`
 	PolicyID             *uint      `db:"policy_id"`
+
+	VPPAppTeamID             *uint     `db:"vpp_app_team_id"`
+	CreatedAt                time.Time `db:"created_at"`
+	NeedsConfigurationResend bool      `db:"needs_configuration_resend"`
 }
 
 type HostVPPSoftwareInstallLite struct {
@@ -349,45 +358,38 @@ func ValidateAppleAppConfiguration(config []byte) error {
 	// Raw-bytes scan catches structural bypasses (duplicate keys, trailing
 	// siblings) invisible to the decoded tree. The decoded-tree walk below
 	// catches XML-entity-encoded tokens the regex won't match.
-	for _, name := range variables.Find(string(config)) {
+	rawVars := variables.FindKeepDuplicates(string(config))
+	decodedVars := fleetVarsInPlistValue(root)
+	for _, name := range slices.Concat(rawVars, decodedVars) {
 		if !slices.Contains(FleetVarsSupportedInAppleAppConfig, FleetVarName(name)) {
 			return NewInvalidArgumentError("configuration", fmt.Sprintf("unsupported variable $FLEET_VAR_%s", name))
 		}
 	}
-	if name, ok := findUnsupportedFleetVar(root); ok {
-		return NewInvalidArgumentError("configuration", fmt.Sprintf("unsupported variable $FLEET_VAR_%s", name))
+	// Reject variables written with XML character references such as &#36;, Fleet only replaces them in the raw bytes. Leave
+	// out XML comments from the raw count since the decoded tree doesn't have them.
+	uncommentedVars := variables.FindKeepDuplicates(xmlCommentRegexp.ReplaceAllString(string(config), ""))
+	if len(decodedVars) > len(uncommentedVars) {
+		return NewInvalidArgumentError("configuration", "Fleet variables must be written as plain text, not with XML character references such as &#36;")
 	}
 	return nil
 }
 
-// findUnsupportedFleetVar walks v's keys and string values and returns the
-// first $FLEET_VAR_* token that is not in FleetVarsSupportedInAppleAppConfig.
-// The second return is false when every referenced variable is allowed.
-func findUnsupportedFleetVar(v any) (string, bool) {
+func fleetVarsInPlistValue(v any) []string {
+	var names []string
 	switch t := v.(type) {
 	case string:
-		for _, name := range variables.Find(t) {
-			if !slices.Contains(FleetVarsSupportedInAppleAppConfig, FleetVarName(name)) {
-				return name, true
-			}
-		}
+		names = variables.FindKeepDuplicates(t)
 	case map[string]any:
 		for k, val := range t {
-			if name, ok := findUnsupportedFleetVar(k); ok {
-				return name, ok
-			}
-			if name, ok := findUnsupportedFleetVar(val); ok {
-				return name, ok
-			}
+			names = append(names, variables.FindKeepDuplicates(k)...)
+			names = append(names, fleetVarsInPlistValue(val)...)
 		}
 	case []any:
 		for _, val := range t {
-			if name, ok := findUnsupportedFleetVar(val); ok {
-				return name, ok
-			}
+			names = append(names, fleetVarsInPlistValue(val)...)
 		}
 	}
-	return "", false
+	return names
 }
 
 // VPPInstallReleaseInfo carries the per-install data the cancel path needs to

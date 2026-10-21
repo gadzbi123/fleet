@@ -113,6 +113,28 @@ func TestValidateAppleAppConfiguration(t *testing.T) {
 			errSub:  "unsupported variable $FLEET_VAR_NDES_SCEP_CHALLENGE",
 		},
 		{
+			name:    "decimal-entity-encoded $ on an allowed variable is rejected since it would be sent as literal text",
+			input:   `<dict><key>K</key><string>&#36;FLEET_VAR_HOST_UUID</string></dict>`,
+			wantErr: true,
+			errSub:  "must be written as plain text",
+		},
+		{
+			name:    "allowed variable written once as plain text and once with an entity is rejected",
+			input:   `<dict><key>A</key><string>$FLEET_VAR_HOST_UUID</string><key>B</key><string>&#x24;FLEET_VAR_HOST_UUID</string></dict>`,
+			wantErr: true,
+			errSub:  "must be written as plain text",
+		},
+		{
+			name:    "allowed variable with an entity is rejected even when an XML comment has the same variable",
+			input:   `<!-- $FLEET_VAR_HOST_UUID --><dict><key>K</key><string>&#36;FLEET_VAR_HOST_UUID</string></dict>`,
+			wantErr: true,
+			errSub:  "must be written as plain text",
+		},
+		{
+			name:  "allowed variable inside a CDATA section is accepted",
+			input: `<dict><key>K</key><string><![CDATA[$FLEET_VAR_HOST_UUID]]></string></dict>`,
+		},
+		{
 			name:    "disallowed variable inside a CDATA section is caught",
 			input:   `<dict><key>K</key><string><![CDATA[$FLEET_VAR_NDES_SCEP_CHALLENGE]]></string></dict>`,
 			wantErr: true,
